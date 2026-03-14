@@ -629,16 +629,13 @@ export function apply(ctx: Context, config: Config) {
 
   ctx.command('猜歌 [genre:string]', '开始猜歌游戏，可选类别和等级筛选')
     .alias('guess')
-    .option('level', '-l <level>指定歌曲等级或等级范围，支持格式：12+、13+-14')
+    .option('level', '-l <level> 指定歌曲等级或等级范围，支持格式：12+、13+-14')
     .option('difficulty', '-d <difficulty> 困难模式，指定难度等级1-4，难度越高音频越短，得分倍数越高')
     .option('number', '-n <number> 连续进行n次猜歌，结束时输出排名')
     .example('猜歌')
     .example('猜歌 东方')
-    .example('猜歌 --level 12+')
-    .example('猜歌 nico -l 12+-14')
-    .example('猜歌 东方 -l 12+ -d 2')
-    .example('猜歌 -n 5')
-    .example('猜歌 东方 -n 3 -d 2')
+    .example('猜歌 -l 12+')
+    .example('猜歌 nico -l 12+-14 -d 1 -n 5')
     .action(async ({ session, options }, genre) => {
       if (!session) return
 

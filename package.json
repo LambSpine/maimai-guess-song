@@ -6,6 +6,10 @@
     "LambSpine <andy1206hu@gmail.com>"
   ],
   "homepage": "https://github.com/LambSpine/maimai-guess-song",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LambSpine/maimai-guess-song.git"
+  },
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
