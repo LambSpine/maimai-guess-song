@@ -674,10 +674,10 @@ export function apply(ctx: Context, config: Config) {
       let totalRounds = 1
       if (numberOption) {
         const parsedNumber = parseInt(numberOption)
-        if (parsedNumber >= 1 && parsedNumber <= 10) {
+        if (parsedNumber >= 1 && parsedNumber <= 20) {
           totalRounds = parsedNumber
         } else {
-          return '连续猜歌轮数必须在1-10之间'
+          return '连续猜歌轮数必须在1-20之间'
         }
       }
       guessGame.totalRounds = totalRounds
@@ -887,7 +887,29 @@ export function apply(ctx: Context, config: Config) {
       return
     })
 
-  function revealAnswer(game: GuessGame): string {
+  ctx.command('终止猜歌', '终止当前猜歌游戏，公布答案并显示排名')
+    .alias('stop')
+    .action(async ({ session }) => {
+      if (!session) return
+
+      const channelId = session.channelId || session.guildId || 'private'
+      const guessGame = getGame(channelId)
+
+      if (!guessGame.active || !guessGame.currentSong) {
+        return '当前没有进行中的猜歌游戏'
+      }
+
+      // 保存当前轮次和总轮数
+      const currentRound = guessGame.currentRound
+      const totalRounds = guessGame.totalRounds
+
+      // 公布当前歌曲答案，传递 shouldContinue = false 表示不继续下一轮
+      revealAnswer(guessGame, false)
+
+      return
+    })
+
+  function revealAnswer(game: GuessGame, shouldContinue = true): string {
     if (!game.currentSong) return '没有进行中的猜歌游戏'
 
     logger.info(`公布答案: ${Date.now()}`)
@@ -927,7 +949,7 @@ export function apply(ctx: Context, config: Config) {
     const session = game.session
     
     // 检查是否需要开始下一轮
-    if (game.currentRound < game.totalRounds && session) {
+    if (shouldContinue && game.currentRound < game.totalRounds && session) {
       message += `\n\n第 ${game.currentRound + 1}/${game.totalRounds} 轮开始！`
       // 发送答案消息
       session.send(message)
@@ -945,9 +967,9 @@ export function apply(ctx: Context, config: Config) {
         }
       }, 1000)
     } else if (session) {
-      // 所有轮次完成，显示排名（仅当总轮数大于1时）
+      // 所有轮次完成或终止游戏，显示排名（仅当总轮数大于1时）
       if (game.totalRounds > 1) {
-        message += `\n\n🎉 所有 ${game.totalRounds} 轮猜歌完成！`
+        message += `\n\n${shouldContinue ? `🎉 所有 ${game.totalRounds} 轮猜歌完成！` : '🎮 猜歌游戏已终止！'}`
         message += `\n${getRanking(game.roundResults)}`
       }
       // 发送答案消息
