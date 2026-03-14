@@ -8,6 +8,7 @@ maimai听歌猜曲
 
 支持按歌曲流派/等级筛选猜歌范围，默认全曲库
 支持积分系统，猜对后增加积分，猜歌范围过小会影响积分，困难模式（播放更短片段）提高积分倍率
+支持连续多轮猜歌比赛排名
 
 默认歌曲数据API：https://www.diving-fish.com/api/maimaidxprober/music_data
 别名数据API：https://oss.lista233.cn/alias.json
