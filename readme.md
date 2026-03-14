@@ -5,6 +5,8 @@
 maimai听歌猜曲
 播放5s歌曲片段，用户在1分钟内猜歌。支持别名匹配，支持部分匹配，匹配连续3个汉字或6个字符
 支持全曲库以及按歌曲分类猜歌
-默认歌曲数据API：https://www.diving-fish.com/api/maimaidxprober/music_data，别名数据API：https://oss.lista233.cn/alias.json，可在插件配置中修改
+默认歌曲数据API：https://www.diving-fish.com/api/maimaidxprober/music_data
+别名数据API：https://oss.lista233.cn/alias.json
+可在插件配置中修改
 
 需要安装ffmpeg，并在 [Release](https://github.com/LambSpine/maimai-guess-song/releases) 下载音频资源解压到插件配置的目录
