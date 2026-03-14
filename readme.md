@@ -3,8 +3,11 @@
 [![npm](https://img.shields.io/npm/v/koishi-plugin-maimai-guess-song?style=flat-square)](https://www.npmjs.com/package/koishi-plugin-maimai-guess-song)
 
 maimai听歌猜曲
+
 播放5s歌曲片段，用户在1分钟内猜歌。支持别名匹配，支持部分匹配，匹配连续3个汉字或6个字符
+
 支持全曲库以及按歌曲分类猜歌
+
 默认歌曲数据API：https://www.diving-fish.com/api/maimaidxprober/music_data
 别名数据API：https://oss.lista233.cn/alias.json
 可在插件配置中修改
