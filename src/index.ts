@@ -27,10 +27,12 @@ interface UserScore {
 }
 
 interface GuessGame {
+  channelId: string
   currentSong: SongData | null
   startTime: number | null
   active: boolean
   session: any | null
+  timerId: NodeJS.Timeout | null
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -192,12 +194,104 @@ function extractAudioClip(audioPath: string, duration: number): Promise<string> 
 export function apply(ctx: Context, config: Config) {
   let songCache: SongCache = loadCache()
   let userScores: UserScore = loadScores()
-  let guessGame: GuessGame = {
-    currentSong: null,
-    startTime: null,
-    active: false,
-    session: null
+  let guessGames: Map<string, GuessGame> = new Map()
+
+  function getGame(channelId: string): GuessGame {
+    if (!guessGames.has(channelId)) {
+      guessGames.set(channelId, {
+        channelId,
+        currentSong: null,
+        startTime: null,
+        active: false,
+        session: null,
+        timerId: null
+      })
+    }
+    return guessGames.get(channelId)!
   }
+
+  // 处理猜对后的逻辑
+  async function handleCorrectGuess(session: any, guessGame: GuessGame, userId: string, song: SongData): Promise<void> {
+    if (guessGame.timerId) {
+      clearTimeout(guessGame.timerId)
+      guessGame.timerId = null
+    }
+    guessGame.active = false
+    addUserScore(userId, 1)
+    userScores = loadScores()
+
+    const score = userScores[userId] || 0
+    let message = []
+
+    // 在群聊中@玩家
+    if (session.channelId && !session.isDirect) {
+      message.push(`🎉 恭喜！<at id="${userId}"/> 猜对了！`)
+    } else {
+      message.push(`🎉 恭喜！你猜对了！`)
+    }
+
+    message.push(
+      `歌曲: ${song.title}`,
+      `ID: ${song.id}`,
+      `你的积分: ${score}`
+    )
+
+    await session.send(message.join('\n'))
+  }
+
+  // 监听所有消息，自动检测猜歌答案
+  ctx.middleware(async (session, next) => {
+    const channelId = session.channelId || session.guildId || 'private'
+    const guessGame = getGame(channelId)
+
+    // 如果没有进行中的游戏，继续处理其他命令
+    if (!guessGame.active || !guessGame.currentSong) {
+      return next()
+    }
+
+    // 获取消息内容
+    const content = session.content?.trim()
+    if (!content) return next()
+
+    const userId = session.userId || 'unknown'
+    const song = guessGame.currentSong
+    const answerLower = content.toLowerCase()
+    const songTitle = song.title.toLowerCase()
+    const songBasicTitle = song.basic_info.title.toLowerCase()
+
+    const aliasInfo = songCache.aliasData.find(alias => alias.SongID.toString() === song.id)
+    const allAliases = aliasInfo?.Alias || []
+    const aliasNames = allAliases.map(a => a.toLowerCase())
+
+    const exactMatch = answerLower === songTitle ||
+      answerLower === songBasicTitle ||
+      aliasNames.includes(answerLower)
+
+    const partialMatch = songTitle.includes(answerLower) ||
+      songBasicTitle.includes(answerLower) ||
+      aliasNames.some(alias => alias.includes(answerLower))
+
+    // 完全匹配
+    if (exactMatch) {
+      await handleCorrectGuess(session, guessGame, userId, song)
+      return
+    }
+
+    // 部分匹配（需要满足长度要求）
+    if (partialMatch) {
+      const isChinese = /[\u4e00-\u9fa5]/.test(content)
+      const matchLength = content.length
+      const requiredLength = isChinese ? 3 : 6
+
+      if (matchLength >= requiredLength) {
+        await handleCorrectGuess(session, guessGame, userId, song)
+        return
+      }
+    }
+
+    // 不匹配，继续处理其他命令
+    return next()
+  })
 
   async function fetchMusicData(): Promise<SongData[]> {
     try {
@@ -222,39 +316,62 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  function findSongByKeyword(keyword: string): { song: SongData | null, aliases: string[] } {
+  function findSongByKeyword(keyword: string): { song: SongData | null, aliases: string[], multiple: boolean, allMatches: SongData[] } {
     const searchTerm = keyword.toLowerCase().trim()
     
+    // 按ID精确匹配
     const songById = songCache.musicData.find(song => song.id === searchTerm)
     if (songById) {
       const aliasInfo = songCache.aliasData.find(alias => alias.SongID.toString() === songById.id)
-      return { song: songById, aliases: aliasInfo?.Alias || [] }
+      return { 
+        song: songById, 
+        aliases: aliasInfo?.Alias || [],
+        multiple: false,
+        allMatches: [songById]
+      }
     }
 
-    const songByTitle = songCache.musicData.find(song => 
+    // 按标题模糊匹配
+    const songsByTitle = songCache.musicData.filter(song => 
       song.title.toLowerCase().includes(searchTerm) ||
       song.basic_info.title.toLowerCase().includes(searchTerm)
     )
-    if (songByTitle) {
-      const aliasInfo = songCache.aliasData.find(alias => alias.SongID.toString() === songByTitle.id)
-      return { song: songByTitle, aliases: aliasInfo?.Alias || [] }
+    if (songsByTitle.length > 0) {
+      const firstSong = songsByTitle[0]
+      const aliasInfo = songCache.aliasData.find(alias => alias.SongID.toString() === firstSong.id)
+      return { 
+        song: firstSong, 
+        aliases: aliasInfo?.Alias || [],
+        multiple: songsByTitle.length > 1,
+        allMatches: songsByTitle
+      }
     }
 
-    const aliasMatch = songCache.aliasData.find(aliasData => 
+    // 按别名模糊匹配
+    const aliasMatches = songCache.aliasData.filter(aliasData => 
       aliasData.Name.toLowerCase().includes(searchTerm) ||
       aliasData.Alias.some(alias => alias.toLowerCase().includes(searchTerm))
     )
-    if (aliasMatch) {
-      const song = songCache.musicData.find(s => s.id === aliasMatch.SongID.toString())
-      return { song: song || null, aliases: aliasMatch.Alias }
+    if (aliasMatches.length > 0) {
+      const firstAlias = aliasMatches[0]
+      const song = songCache.musicData.find(s => s.id === firstAlias.SongID.toString())
+      const allSongs = aliasMatches.map(alias => 
+        songCache.musicData.find(s => s.id === alias.SongID.toString())
+      ).filter((s): s is SongData => s !== undefined)
+      return { 
+        song: song || null, 
+        aliases: firstAlias.Alias,
+        multiple: allSongs.length > 1,
+        allMatches: allSongs
+      }
     }
 
-    return { song: null, aliases: [] }
+    return { song: null, aliases: [], multiple: false, allMatches: [] }
   }
 
-  ctx.command('song', 'maimai 歌曲相关命令')
+  const songCmd = ctx.command('song', 'maimai 歌曲相关命令')
 
-  ctx.command('song/refresh', '刷新歌曲数据库')
+  songCmd.subcommand('.refresh', '刷新歌曲数据库')
     .alias('歌曲刷新')
     .action(async ({ session }) => {
       if (!session) return
@@ -288,7 +405,7 @@ export function apply(ctx: Context, config: Config) {
       }
     })
 
-  ctx.command('song/alias <keyword:text>', '查询歌曲别名')
+  songCmd.subcommand('.alias <keyword:text>', '查询歌曲别名')
     .alias('歌曲别名')
     .example('song alias 天界')
     .action(async ({ session }, keyword) => {
@@ -303,10 +420,25 @@ export function apply(ctx: Context, config: Config) {
       }
 
       try {
-        const { song, aliases } = findSongByKeyword(keyword)
+        const { song, aliases, multiple, allMatches } = findSongByKeyword(keyword)
 
         if (!song) {
           return `未找到与 "${keyword}" 相关的歌曲`
+        }
+
+        // 处理多匹配情况
+        if (multiple) {
+          const message = [
+            `找到 ${allMatches.length} 首匹配的歌曲：`,
+            ...allMatches.map((match, index) => {
+              const aliasInfo = songCache.aliasData.find(alias => alias.SongID.toString() === match.id)
+              const matchAliases = aliasInfo?.Alias || []
+              return `${index + 1}. ${match.title} (ID: ${match.id}) ${matchAliases.length > 0 ? `[别名: ${matchAliases.slice(0, 2).join(', ')}${matchAliases.length > 2 ? '...' : ''}]` : ''}`
+            }),
+            '',
+            '请使用更精确的关键词或歌曲ID查询' 
+          ]
+          return message.join('\n')
         }
 
         const aliasInfo = songCache.aliasData.find(alias => alias.SongID.toString() === song.id)
@@ -338,7 +470,7 @@ export function apply(ctx: Context, config: Config) {
       }
     })
 
-  ctx.command('song/search <keyword:text>', '搜索歌曲')
+  songCmd.subcommand('.search <keyword:text>', '搜索歌曲')
     .alias('搜索歌曲')
     .example('song search 天界')
     .action(async ({ session }, keyword) => {
@@ -353,10 +485,23 @@ export function apply(ctx: Context, config: Config) {
       }
 
       try {
-        const { song, aliases } = findSongByKeyword(keyword)
+        const { song, aliases, multiple, allMatches } = findSongByKeyword(keyword)
 
         if (!song) {
           return `未找到与 "${keyword}" 相关的歌曲`
+        }
+
+        // 处理多匹配情况
+        if (multiple) {
+          const message = [
+            `找到 ${allMatches.length} 首匹配的歌曲：`,
+            ...allMatches.map((match, index) => {
+              return `${index + 1}. ${match.title} (ID: ${match.id})`
+            }),
+            '',
+            '请使用更精确的关键词或歌曲ID查询' 
+          ]
+          return message.join('\n')
         }
 
         const difficultyNames = ['Basic', 'Advanced', 'Expert', 'Master', 'Re:Master']
@@ -384,10 +529,15 @@ export function apply(ctx: Context, config: Config) {
       }
     })
 
-  ctx.command('猜歌', '开始猜歌游戏')
+  ctx.command('猜歌 [genre:string]', '开始猜歌游戏，可选类别筛选')
     .alias('guess')
-    .action(async ({ session }) => {
+    .example('猜歌')
+    .example('猜歌 东方')
+    .action(async ({ session }, genre) => {
       if (!session) return
+
+      const channelId = session.channelId || session.guildId || 'private'
+      const guessGame = getGame(channelId)
 
       if (songCache.musicData.length === 0) {
         return '歌曲数据库为空，请先使用 song refresh 命令刷新数据'
@@ -406,6 +556,20 @@ export function apply(ctx: Context, config: Config) {
           if (songId > 100000) {
             return false
           }
+          // 按类别筛选
+          if (genre) {
+            const songGenre = song.basic_info.genre.toLowerCase()
+            const targetGenre = genre.toLowerCase()
+            
+            // 检查是否为中文输入
+            const isChineseInput = /[\u4e00-\u9fa5]/.test(genre)
+            const minLength = isChineseInput ? 2 : 4
+            
+            // 模糊匹配：只要包含目标字符串且长度达标
+            if (targetGenre.length < minLength || !songGenre.includes(targetGenre)) {
+              return false
+            }
+          }
           const baseId = songId > 10000 ? (songId - 10000).toString() : song.id
           if (seenBaseIds.has(baseId)) {
             return false // 已存在该基础ID，跳过
@@ -413,6 +577,13 @@ export function apply(ctx: Context, config: Config) {
           seenBaseIds.add(baseId)
           return true
         })
+        
+        if (uniqueSongs.length === 0) {
+          return genre 
+            ? `未找到歌曲类别`
+            : '未找到可用于猜歌的歌曲'
+        }
+        
         const randomSong = uniqueSongs[Math.floor(Math.random() * uniqueSongs.length)]
         guessGame.currentSong = randomSong
         guessGame.startTime = Date.now()
@@ -440,8 +611,11 @@ export function apply(ctx: Context, config: Config) {
         const audioPath = path.join(config.audioDir, audioFile)
         logger.info(`音频文件路径: ${audioPath}`)
 
-        await session.send('🎵 猜歌游戏开始！')
-        await session.send('📝 请在1分钟内猜出歌曲名称或别名')
+        let startMessage = '🎵 猜歌游戏开始！请在1分钟内猜出歌曲名称或别名'
+        if (genre) {
+          startMessage += `\n类别: ${randomSong.basic_info.genre}`
+        }
+        await session.send(startMessage)
         
         // 随机截取5秒音频
         const clipPath = await extractAudioClip(audioPath, 5)
@@ -463,13 +637,19 @@ export function apply(ctx: Context, config: Config) {
 
         logger.info(`开始猜歌游戏: ${randomSong.title} (ID: ${randomSong.id})`)
 
-        setTimeout(() => {
+        if (guessGame.timerId) {
+          clearTimeout(guessGame.timerId)
+          guessGame.timerId = null
+          logger.info('清理旧的定时器')
+        }
+
+        guessGame.timerId = setTimeout(() => {
+          logger.info(`定时器触发: ${Date.now()}`)
           if (guessGame.active && guessGame.currentSong) {
-            revealAnswer()
+            revealAnswer(guessGame)
           }
         }, 60000)
-
-        return '游戏开始！'
+        logger.info(`定时器已启动: ${Date.now()}`)
       } catch (error) {
         logger.error('开始猜歌游戏失败:', error)
         const errorMessage = error instanceof Error ? error.message : String(error)
@@ -477,79 +657,12 @@ export function apply(ctx: Context, config: Config) {
       }
     })
 
-  ctx.command('猜 <answer:text>', '猜歌答案')
-    .action(async ({ session }, answer) => {
-      if (!session) return
-
-      if (!guessGame.active || !guessGame.currentSong) {
-        return '当前没有进行中的猜歌游戏'
-      }
-
-      const userId = (session as any).user?.id || (session as any).userId || 'unknown'
-      const song = guessGame.currentSong
-      const answerLower = answer.toLowerCase().trim()
-      const songTitle = song.title.toLowerCase()
-      const songBasicTitle = song.basic_info.title.toLowerCase()
-
-      const aliasInfo = songCache.aliasData.find(alias => alias.SongID.toString() === song.id)
-      const allAliases = aliasInfo?.Alias || []
-      const aliasNames = allAliases.map(a => a.toLowerCase())
-
-      const exactMatch = answerLower === songTitle || 
-                       answerLower === songBasicTitle ||
-                       aliasNames.includes(answerLower)
-
-      const partialMatch = songTitle.includes(answerLower) ||
-                        songBasicTitle.includes(answerLower) ||
-                        aliasNames.some(alias => alias.includes(answerLower))
-
-      if (exactMatch) {
-        guessGame.active = false
-        addUserScore(userId, 1)
-        userScores = loadScores()
-        
-        const score = userScores[userId] || 0
-        const message = [
-          `🎉 恭喜！你猜对了！`,
-          `歌曲: ${song.title}`,
-          `ID: ${song.id}`,
-          `你的积分: ${score}`
-        ].join('\n')
-        
-        return message
-      }
-
-      if (partialMatch) {
-        const isChinese = /[\u4e00-\u9fa5]/.test(answer)
-        const matchLength = answer.length
-        const requiredLength = isChinese ? 3 : 6
-
-        if (matchLength >= requiredLength) {
-          guessGame.active = false
-          addUserScore(userId, 1)
-          userScores = loadScores()
-          
-          const score = userScores[userId] || 0
-          const message = [
-            `🎉 恭喜！你猜对了！`,
-            `歌曲: ${song.title}`,
-            `ID: ${song.id}`,
-            `你的积分: ${score}`
-          ].join('\n')
-          
-          return message
-        }
-      }
-
-      return '❌ 猜错了，请再试一次'
-    })
-
   ctx.command('积分', '查看积分')
     .alias('score')
     .action(async ({ session }) => {
       if (!session) return
 
-      const userId = (session as any).user?.id || (session as any).userId || 'unknown'
+      const userId = session.userId || 'unknown'
       const score = getUserScore(userId)
       return `你的积分: ${score}`
     })
@@ -559,21 +672,31 @@ export function apply(ctx: Context, config: Config) {
     .action(async ({ session }) => {
       if (!session) return
 
+      const channelId = session.channelId || session.guildId || 'private'
+      const guessGame = getGame(channelId)
+
       if (!guessGame.active || !guessGame.currentSong) {
         return '当前没有进行中的猜歌游戏'
       }
 
-      revealAnswer()
+      revealAnswer(guessGame)
       return
     })
 
-  function revealAnswer(): string {
-    if (!guessGame.currentSong) return '没有进行中的猜歌游戏'
+  function revealAnswer(game: GuessGame): string {
+    if (!game.currentSong) return '没有进行中的猜歌游戏'
 
-    const song = guessGame.currentSong
-    guessGame.active = false
-    guessGame.currentSong = null
-    guessGame.startTime = null
+    logger.info(`公布答案: ${Date.now()}`)
+
+    if (game.timerId) {
+      clearTimeout(game.timerId)
+      game.timerId = null
+    }
+
+    const song = game.currentSong
+    game.active = false
+    game.currentSong = null
+    game.startTime = null
 
     const aliasInfo = songCache.aliasData.find(alias => alias.SongID.toString() === song.id)
     const aliases = aliasInfo?.Alias || []
@@ -588,10 +711,10 @@ export function apply(ctx: Context, config: Config) {
     ].join('\n')
 
     // 发送答案消息
-    if (guessGame.session) {
-      guessGame.session.send(message)
+    if (game.session) {
+      game.session.send(message)
     }
-    guessGame.session = null
+    game.session = null
 
     return message
   }
