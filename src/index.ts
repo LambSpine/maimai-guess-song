@@ -33,6 +33,8 @@ interface GuessGame {
   active: boolean
   session: any | null
   timerId: NodeJS.Timeout | null
+  songCount: number // 参与随机的歌曲数量
+  difficulty: number // 难度等级 0-4
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -204,7 +206,9 @@ export function apply(ctx: Context, config: Config) {
         startTime: null,
         active: false,
         session: null,
-        timerId: null
+        timerId: null,
+        songCount: 0,
+        difficulty: 0
       })
     }
     return guessGames.get(channelId)!
@@ -217,7 +221,18 @@ export function apply(ctx: Context, config: Config) {
       guessGame.timerId = null
     }
     guessGame.active = false
-    addUserScore(userId, 1)
+    
+    // 根据难度等级计算得分倍数
+    const difficultyMultipliers = [1, 1.5, 2, 2.5, 3] // 难度 0-4
+    const multiplier = difficultyMultipliers[guessGame.difficulty] || 1
+    
+    // 计算基础积分（参与随机的歌曲数量，最多100分）
+    const basePoints = Math.min(guessGame.songCount, 100)
+    
+    // 计算最终积分（基础积分 × 难度倍数，取整数）
+    const points = Math.round(basePoints * multiplier)
+    
+    addUserScore(userId, points)
     userScores = loadScores()
 
     const score = userScores[userId] || 0
@@ -529,15 +544,41 @@ export function apply(ctx: Context, config: Config) {
       }
     })
 
-  ctx.command('猜歌 [genre:string]', '开始猜歌游戏，可选类别筛选')
+  ctx.command('猜歌 [genre:string]', '开始猜歌游戏，可选类别和等级筛选')
     .alias('guess')
+    .option('level', '-l <level>指定歌曲等级，支持格式：12+、12-14、12、12+-13')
+    .option('difficulty', '--difficulty <difficulty> 困难模式，指定难度等级，1-4，难度越高音频越短，得分倍数越高')
+    .option('difficulty', '--hard 困难模式，指定难度等级为2', { value: 2 })
     .example('猜歌')
     .example('猜歌 东方')
-    .action(async ({ session }, genre) => {
+    .example('猜歌 --level 12+')
+    .example('猜歌 nico -l 12+-14')
+    .example('猜歌 --hard')
+    .example('猜歌 东方 --difficulty 2 --level 12+')
+    .action(async ({ session, options }, genre) => {
       if (!session) return
 
       const channelId = session.channelId || session.guildId || 'private'
       const guessGame = getGame(channelId)
+      const levelOption = (options as any).level
+      const hardOption = (options as any).difficulty
+      
+      // 验证难度等级
+      let difficulty = 0
+      if (hardOption) {
+        logger.info(`收到难度选项: ${hardOption}, 类型: ${typeof hardOption}`)
+        const parsedDifficulty = parseInt(hardOption)
+        logger.info(`解析后的难度: ${parsedDifficulty}, 类型: ${typeof parsedDifficulty}`)
+        if (parsedDifficulty >= 0 && parsedDifficulty <= 4) {
+          difficulty = parsedDifficulty
+          logger.info(`设置难度等级: ${difficulty}`)
+        } else {
+          logger.info(`难度验证失败: ${parsedDifficulty} 不在 0-4 范围内`)
+          return '难度等级必须在0-4之间'
+        }
+      }
+      guessGame.difficulty = difficulty
+      logger.info(`最终难度等级: ${guessGame.difficulty}`)
 
       if (songCache.musicData.length === 0) {
         return '歌曲数据库为空，请先使用 song refresh 命令刷新数据'
@@ -570,6 +611,44 @@ export function apply(ctx: Context, config: Config) {
               return false
             }
           }
+          // 按等级筛选
+          if (levelOption) {
+            const hasMatchingLevel = song.level.some(lvl => {
+              if (lvl === '-') return false
+              
+              // 解析等级选项，支持 "12+"、"12-14"、"12+-13"、"12" 等格式
+                if (levelOption.includes('-')) {
+                  // 用户输入 "12-14" 或 "12+-13" 等范围格式
+                  const [start, end] = levelOption.split('-')
+                  
+                  // 解析起始等级
+                  const startValue = start.includes('+') 
+                    ? parseInt(start) + 0.5 
+                    : parseInt(start)
+                  
+                  // 解析结束等级
+                  const endValue = end.includes('+') 
+                    ? parseInt(end) + 0.5 
+                    : parseInt(end)
+                  
+                  if (isNaN(startValue) || isNaN(endValue)) return false
+                  
+                  // 将等级字符串转换为数值进行比较
+                  // "12+" -> 12.5, "13+" -> 13.5, "12" -> 12, "13" -> 13
+                  const lvlValue = lvl.includes('+') 
+                    ? parseInt(lvl) + 0.5 
+                    : parseInt(lvl)
+                  
+                  return lvlValue >= startValue && lvlValue <= endValue
+                } else {
+                  // 用户输入 "12+" 或 "12" 等精确匹配格式
+                  return lvl === levelOption
+                }
+            })
+            if (!hasMatchingLevel) {
+              return false
+            }
+          }
           const baseId = songId > 10000 ? (songId - 10000).toString() : song.id
           if (seenBaseIds.has(baseId)) {
             return false // 已存在该基础ID，跳过
@@ -579,9 +658,15 @@ export function apply(ctx: Context, config: Config) {
         })
         
         if (uniqueSongs.length === 0) {
-          return genre 
-            ? `未找到歌曲类别`
-            : '未找到可用于猜歌的歌曲'
+          let errorMsg = '未找到可用于猜歌的歌曲'
+          if (genre && levelOption) {
+            errorMsg = `未找到类别包含 "${genre}" 且等级为 "${levelOption}" 的歌曲`
+          } else if (genre) {
+            errorMsg = `未找到包含 "${genre}" 的歌曲类别`
+          } else if (levelOption) {
+            errorMsg = `未找到等级为 "${levelOption}" 的歌曲`
+          }
+          return errorMsg
         }
         
         const randomSong = uniqueSongs[Math.floor(Math.random() * uniqueSongs.length)]
@@ -589,6 +674,7 @@ export function apply(ctx: Context, config: Config) {
         guessGame.startTime = Date.now()
         guessGame.active = true
         guessGame.session = session
+        guessGame.songCount = uniqueSongs.length // 设置参与随机的歌曲数量
 
         const audioFiles = fs.readdirSync(config.audioDir)
         const audioFile = audioFiles.find(file => {
@@ -612,13 +698,19 @@ export function apply(ctx: Context, config: Config) {
         logger.info(`音频文件路径: ${audioPath}`)
 
         let startMessage = '🎵 猜歌游戏开始！请在1分钟内猜出歌曲名称或别名'
-        if (genre) {
-          startMessage += `\n类别: ${randomSong.basic_info.genre}`
+        if (genre || levelOption || guessGame.difficulty > 0) {
+          const filters = []
+          if (genre) filters.push(`类别: ${randomSong.basic_info.genre}`)
+          if (levelOption) filters.push(`等级: ${levelOption}`)
+          if (guessGame.difficulty > 0) filters.push(`难度: ${guessGame.difficulty}`)
+          startMessage += '\n' + filters.join(' | ')
         }
         await session.send(startMessage)
         
-        // 随机截取5秒音频
-        const clipPath = await extractAudioClip(audioPath, 5)
+        // 根据难度等级计算音频时长（5秒 - 难度等级秒数）
+        const baseDuration = 5
+        const duration = Math.max(1, baseDuration - guessGame.difficulty)
+        const clipPath = await extractAudioClip(audioPath, duration)
         
         // 读取截取后的音频文件并转换为 base64
         const audioBuffer = fs.readFileSync(clipPath)
