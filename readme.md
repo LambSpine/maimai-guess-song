@@ -15,4 +15,4 @@ maimai听歌猜曲
 可在插件配置中修改
 
 需要安装ffmpeg，并在 [Release](https://github.com/LambSpine/maimai-guess-song/releases) 下载音频资源解压到插件配置的目录
-缺少歌曲restricted access，自己找资源补一下吧
+缺少歌曲restricted access，got more raves自己找资源补一下吧
