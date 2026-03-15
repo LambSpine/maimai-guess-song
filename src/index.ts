@@ -8,6 +8,7 @@ const logger = new Logger('maimai-guess-song')
 const STORAGE_DIR = path.join(process.cwd(), 'data', 'maimai-guess-song')
 const STORAGE_FILE = path.join(STORAGE_DIR, 'song-cache.json')
 const SCORE_FILE = path.join(STORAGE_DIR, 'user-scores.json')
+const FAVORITE_FILE = path.join(STORAGE_DIR, 'channel-favorites.json')
 
 // 确保存储目录存在
 if (!fs.existsSync(STORAGE_DIR)) {
@@ -26,6 +27,10 @@ interface UserScore {
   [userId: string]: number
 }
 
+interface ChannelFavorites {
+  [channelId: string]: string[]
+}
+
 interface GuessGame {
   channelId: string
   currentSong: SongData | null
@@ -40,6 +45,7 @@ interface GuessGame {
   roundResults: { userId: string; songId: string; correct: boolean; points: number }[] // 每轮结果
   genre: string | undefined // 歌曲类别
   levelOption: string | undefined // 等级选项
+  favoriteOption: boolean | undefined // 是否只使用收藏歌曲
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -140,6 +146,29 @@ function saveScores(scores: UserScore): void {
   }
 }
 
+// 加载频道收藏
+function loadFavorites(): ChannelFavorites {
+  try {
+    if (fs.existsSync(FAVORITE_FILE)) {
+      const data = fs.readFileSync(FAVORITE_FILE, 'utf8')
+      return JSON.parse(data)
+    }
+  } catch (error) {
+    logger.error('加载频道收藏失败:', error)
+  }
+  return {}
+}
+
+// 保存频道收藏
+function saveFavorites(favorites: ChannelFavorites): void {
+  try {
+    fs.writeFileSync(FAVORITE_FILE, JSON.stringify(favorites, null, 2))
+    logger.info('频道收藏已保存')
+  } catch (error) {
+    logger.error('保存频道收藏失败:', error)
+  }
+}
+
 // 获取用户积分
 function getUserScore(userId: string): number {
   const scores = loadScores()
@@ -218,7 +247,8 @@ export function apply(ctx: Context, config: Config) {
         currentRound: 0,
         roundResults: [],
         genre: undefined,
-        levelOption: undefined
+        levelOption: undefined,
+        favoriteOption: undefined
       })
     }
     return guessGames.get(channelId)!
@@ -241,6 +271,7 @@ export function apply(ctx: Context, config: Config) {
     guessGame.roundResults = []
     guessGame.genre = undefined
     guessGame.levelOption = undefined
+    guessGame.favoriteOption = undefined
   }
 
   // 生成排名
@@ -323,7 +354,7 @@ export function apply(ctx: Context, config: Config) {
       await session.send(message.join('\n'))
       // 延迟1秒开始下一轮
       setTimeout(async () => {
-        await startGuessGame(session, guessGame, guessGame.genre, guessGame.levelOption)
+        await startGuessGame(session, guessGame, guessGame.genre, guessGame.levelOption, guessGame.favoriteOption)
       }, 1000)
     } else {
       // 所有轮次完成，显示排名（仅当总轮数大于1时）
@@ -627,15 +658,314 @@ export function apply(ctx: Context, config: Config) {
       }
     })
 
+  songCmd.subcommand('.favorite.add <songIds:text>', '添加歌曲到收藏')
+    .alias('添加收藏')
+    .example('song favorite.add 10001 10002 10003')
+    .action(async ({ session }, songIds) => {
+      if (!session) return
+
+      const channelId = session.channelId || session.guildId || 'private'
+      
+      if (!songIds || songIds.trim().length === 0) {
+        return '请输入要收藏的歌曲ID，可以输入多个ID，用空格分隔'
+      }
+
+      const idList = songIds.trim().split(/\s+/).filter(id => id.length > 0)
+      
+      if (idList.length === 0) {
+        return '请输入要收藏的歌曲ID，可以输入多个ID，用空格分隔'
+      }
+
+      if (songCache.musicData.length === 0) {
+        return '歌曲数据库为空，请先使用 song refresh 命令刷新数据'
+      }
+
+      try {
+        const favorites = loadFavorites()
+        const channelFavorites = favorites[channelId] || []
+        const addedSongs: string[] = []
+        const notFoundSongs: string[] = []
+        const alreadyFavoritedSongs: string[] = []
+
+        for (const songId of idList) {
+          const song = songCache.musicData.find(s => s.id === songId)
+          
+          if (!song) {
+            notFoundSongs.push(songId)
+            continue
+          }
+
+          if (channelFavorites.includes(songId)) {
+            alreadyFavoritedSongs.push(songId)
+            continue
+          }
+
+          channelFavorites.push(songId)
+          addedSongs.push(songId)
+        }
+
+        if (addedSongs.length > 0) {
+          favorites[channelId] = channelFavorites
+          saveFavorites(favorites)
+        }
+
+        const message = []
+        
+        if (addedSongs.length > 0) {
+          message.push(`✅ 成功添加 ${addedSongs.length} 首歌曲到收藏：`)
+          addedSongs.forEach(songId => {
+            const song = songCache.musicData.find(s => s.id === songId)
+            message.push(`  - ${song?.title} (ID: ${songId})`)
+          })
+        }
+
+        if (alreadyFavoritedSongs.length > 0) {
+          message.push(`\n⚠️ 以下歌曲已在收藏中：`)
+          alreadyFavoritedSongs.forEach(songId => {
+            const song = songCache.musicData.find(s => s.id === songId)
+            message.push(`  - ${song?.title} (ID: ${songId})`)
+          })
+        }
+
+        if (notFoundSongs.length > 0) {
+          message.push(`\n❌ 以下歌曲ID未找到：`)
+          notFoundSongs.forEach(songId => {
+            message.push(`  - ${songId}`)
+          })
+        }
+
+        if (message.length === 0) {
+          return '未添加任何歌曲到收藏'
+        }
+
+        return message.join('\n')
+      } catch (error) {
+        logger.error('添加收藏失败:', error)
+        return '添加收藏失败，请稍后重试'
+      }
+    })
+
+  songCmd.subcommand('.favorite.remove <songIds:text>', '删除收藏的歌曲')
+    .alias('删除收藏')
+    .example('song favorite.remove 315')
+    .example('song favorite.remove 10001 10002 10003')
+    .action(async ({ session }, songIds) => {
+      if (!session) return
+
+      const channelId = session.channelId || session.guildId || 'private'
+      
+      if (!songIds || songIds.trim().length === 0) {
+        return '请输入要删除的歌曲ID，可以输入多个ID，用空格分隔'
+      }
+
+      const idList = songIds.trim().split(/\s+/).filter(id => id.length > 0)
+      
+      if (idList.length === 0) {
+        return '请输入要删除的歌曲ID，可以输入多个ID，用空格分隔'
+      }
+
+      try {
+        const favorites = loadFavorites()
+        const channelFavorites = favorites[channelId] || []
+        const removedSongs: string[] = []
+        const notFoundSongs: string[] = []
+
+        for (const songId of idList) {
+          const index = channelFavorites.indexOf(songId)
+          
+          if (index === -1) {
+            notFoundSongs.push(songId)
+            continue
+          }
+
+          channelFavorites.splice(index, 1)
+          removedSongs.push(songId)
+        }
+
+        if (removedSongs.length > 0) {
+          favorites[channelId] = channelFavorites
+          saveFavorites(favorites)
+        }
+
+        const message = []
+        
+        if (removedSongs.length > 0) {
+          message.push(`✅ 成功删除 ${removedSongs.length} 首收藏歌曲：`)
+          removedSongs.forEach(songId => {
+            const song = songCache.musicData.find(s => s.id === songId)
+            message.push(`  - ${song?.title || '未知歌曲'} (ID: ${songId})`)
+          })
+        }
+
+        if (notFoundSongs.length > 0) {
+          message.push(`\n❌ 以下歌曲ID不在收藏中：`)
+          notFoundSongs.forEach(songId => {
+            message.push(`  - ${songId}`)
+          })
+        }
+
+        if (message.length === 0) {
+          return '未删除任何收藏歌曲'
+        }
+
+        return message.join('\n')
+      } catch (error) {
+        logger.error('删除收藏失败:', error)
+        return '删除收藏失败，请稍后重试'
+      }
+    })
+
+  songCmd.subcommand('.favorite.copy <sourceChannelId:text>', '复制其他频道的收藏到当前频道')
+    .alias('复制收藏')
+    .option('replace', '-r 替换当前频道的收藏，而不是追加')
+    .example('song favorite.copy 123456789')
+    .example('song favorite.copy -r 123456789')
+    .action(async ({ session, options }, sourceChannelId) => {
+      if (!session) return
+
+      const targetChannelId = session.channelId || session.guildId || 'private'
+      const replaceMode = (options as any).replace
+      
+      if (!sourceChannelId || sourceChannelId.trim().length === 0) {
+        return '请输入要复制收藏的源频道ID'
+      }
+
+      const sourceId = sourceChannelId.trim()
+      
+      if (sourceId === targetChannelId) {
+        return '源频道和目标频道不能相同'
+      }
+
+      try {
+        const favorites = loadFavorites()
+        const sourceFavorites = favorites[sourceId] || []
+        
+        if (sourceFavorites.length === 0) {
+          return `源频道 ${sourceId} 没有收藏任何歌曲`
+        }
+
+        const message = []
+        
+        if (replaceMode) {
+          const oldFavorites = favorites[targetChannelId] || []
+          favorites[targetChannelId] = [...sourceFavorites]
+          saveFavorites(favorites)
+          
+          message.push(`✅ 已替换当前频道的收藏`)
+          message.push(`从频道 ${sourceId} 复制了 ${sourceFavorites.length} 首歌曲`)
+          
+          if (oldFavorites.length > 0) {
+            message.push(`清除了 ${oldFavorites.length} 首原有收藏`)
+          }
+        } else {
+          const targetFavorites = favorites[targetChannelId] || []
+          const newSongs: string[] = []
+          const existingSongs: string[] = []
+
+          for (const songId of sourceFavorites) {
+            if (!targetFavorites.includes(songId)) {
+              targetFavorites.push(songId)
+              newSongs.push(songId)
+            } else {
+              existingSongs.push(songId)
+            }
+          }
+
+          if (newSongs.length > 0) {
+            favorites[targetChannelId] = targetFavorites
+            saveFavorites(favorites)
+          }
+
+          if (newSongs.length > 0) {
+            message.push(`✅ 成功从频道 ${sourceId} 复制 ${newSongs.length} 首歌曲到当前频道：`)
+            newSongs.forEach(songId => {
+              const song = songCache.musicData.find(s => s.id === songId)
+              message.push(`  - ${song?.title || '未知歌曲'} (ID: ${songId})`)
+            })
+          }
+
+          if (existingSongs.length > 0) {
+            message.push(`\n⚠️ 以下歌曲已在当前频道收藏中：`)
+            existingSongs.forEach(songId => {
+              const song = songCache.musicData.find(s => s.id === songId)
+              message.push(`  - ${song?.title || '未知歌曲'} (ID: ${songId})`)
+            })
+          }
+
+          if (message.length === 0) {
+            return `源频道 ${sourceId} 的所有收藏歌曲都已在当前频道中`
+          }
+        }
+
+        return message.join('\n')
+      } catch (error) {
+        logger.error('复制收藏失败:', error)
+        return '复制收藏失败，请稍后重试'
+      }
+    })
+
+  songCmd.subcommand('.favorite.list [page:number]', '查看收藏列表')
+    .alias('查看收藏')
+    .example('song favorite.list')
+    .example('song favorite.list 2')
+    .action(async ({ session }, page) => {
+      if (!session) return
+
+      const channelId = session.channelId || session.guildId || 'private'
+      const favorites = loadFavorites()
+      const channelFavorites = favorites[channelId] || []
+
+      if (channelFavorites.length === 0) {
+        return '当前频道还没有收藏任何歌曲\n使用 "song favorite.add <歌曲ID>" 添加收藏'
+      }
+
+      const pageSize = 10
+      const currentPage = page || 1
+      const totalPages = Math.ceil(channelFavorites.length / pageSize)
+
+      if (currentPage < 1 || currentPage > totalPages) {
+        return `页码无效，请输入 1-${totalPages} 之间的页码`
+      }
+
+      const sortedFavorites = [...channelFavorites].sort((a, b) => {
+        const numA = parseInt(a)
+        const numB = parseInt(b)
+        return numA - numB
+      })
+
+      const startIndex = (currentPage - 1) * pageSize
+      const endIndex = Math.min(startIndex + pageSize, sortedFavorites.length)
+      const pageFavorites = sortedFavorites.slice(startIndex, endIndex)
+
+      const message = [
+        `📋 收藏列表 (第 ${currentPage}/${totalPages} 页，共 ${sortedFavorites.length} 首歌曲)`,
+        ''
+      ]
+
+      pageFavorites.forEach((songId, index) => {
+        const song = songCache.musicData.find(s => s.id === songId)
+        const globalIndex = startIndex + index + 1
+        message.push(`${globalIndex}. ${song?.title || '未知歌曲'} (ID: ${songId})`)
+      })
+
+      if (totalPages > 1) {
+        message.push('')
+        message.push(`💡 使用 "song favorite.list ${currentPage + 1}" 查看下一页`)
+      }
+
+      return message.join('\n')
+    })
+
   ctx.command('猜歌 [genre:string]', '开始猜歌游戏，可选类别和等级筛选')
     .alias('guess')
     .option('level', '-l <level> 指定歌曲等级或等级范围，支持格式：12+、13+-14')
-    .option('difficulty', '-d <difficulty> 困难模式，指定难度等级1-4，难度越高音频越短，得分倍数越高')
+    .option('difficulty', '-d <difficulty> 指定难度等级0（默认值）-4，难度越高音频越短，得分倍数越高')
     .option('number', '-n <number> 连续进行n次猜歌，结束时输出排名')
+    .option('favorite', '-f 只从本频道收藏的歌曲中选择')
     .example('猜歌')
     .example('猜歌 东方')
     .example('猜歌 -l 12+')
-    .example('猜歌 nico -l 12+-14 -d 1 -n 5')
+    .example('猜歌 nico -l 12+-14 -d 1 -n 5 -f')
     .action(async ({ session, options }, genre) => {
       if (!session) return
 
@@ -644,6 +974,7 @@ export function apply(ctx: Context, config: Config) {
       const levelOption = (options as any).level
       const hardOption = (options as any).difficulty
       const numberOption = (options as any).number
+      const favoriteOption = (options as any).favorite
       
       if (songCache.musicData.length === 0) {
         return '歌曲数据库为空，请先使用 song refresh 命令刷新数据'
@@ -651,6 +982,15 @@ export function apply(ctx: Context, config: Config) {
 
       if (guessGame.active) {
         return '当前已有猜歌游戏进行中，请等待当前游戏结束'
+      }
+      
+      // 验证收藏模式
+      if (favoriteOption) {
+        const favorites = loadFavorites()
+        const channelFavorites = favorites[channelId] || []
+        if (channelFavorites.length === 0) {
+          return '当前频道还没有收藏任何歌曲\n使用 "song favorite.add <歌曲ID>" 添加收藏'
+        }
       }
 
       // 验证难度等级
@@ -685,10 +1025,11 @@ export function apply(ctx: Context, config: Config) {
       guessGame.roundResults = []
       guessGame.genre = genre
       guessGame.levelOption = levelOption
+      guessGame.favoriteOption = favoriteOption
       logger.info(`设置连续猜歌轮数: ${totalRounds}`)
 
       try {
-        await startGuessGame(session, guessGame, genre, levelOption)
+        await startGuessGame(session, guessGame, genre, levelOption, favoriteOption)
       } catch (error) {
         logger.error('开始猜歌游戏失败:', error)
         const errorMessage = error instanceof Error ? error.message : String(error)
@@ -696,14 +1037,29 @@ export function apply(ctx: Context, config: Config) {
       }
     })
 
-  async function startGuessGame(session: any, guessGame: GuessGame, genre: string | undefined, levelOption: string | undefined): Promise<void> {
+  async function startGuessGame(session: any, guessGame: GuessGame, genre: string | undefined, levelOption: string | undefined, favoriteOption: boolean | undefined): Promise<void> {
     // 使用游戏实例中保存的参数
     const gameGenre = guessGame.genre || genre
     const gameLevelOption = guessGame.levelOption || levelOption
+    const isFavoriteMode = guessGame.favoriteOption || favoriteOption
     
     // 将歌曲ID映射到基础ID（大于10000的减去10000），然后去重，过滤掉ID大于100000的特殊歌曲
     const seenBaseIds = new Set<string>()
-    const uniqueSongs = songCache.musicData.filter(song => {
+    
+    // 先获取基础歌曲列表
+    let baseSongs = songCache.musicData
+    
+    // 收藏模式筛选
+    if (isFavoriteMode) {
+      const channelId = session.channelId || session.guildId || 'private'
+      const favorites = loadFavorites()
+      const channelFavorites = favorites[channelId] || []
+      
+      // 只保留收藏的歌曲
+      baseSongs = baseSongs.filter(song => channelFavorites.includes(song.id))
+    }
+    
+    const uniqueSongs = baseSongs.filter(song => {
       const songId = parseInt(song.id)
       // 过滤掉ID大于100000的特殊歌曲
       if (songId > 100000) {
@@ -778,6 +1134,12 @@ export function apply(ctx: Context, config: Config) {
       } else if (gameLevelOption) {
         errorMsg = `未找到等级为 "${gameLevelOption}" 的歌曲`
       }
+      
+      // 在收藏模式下添加前缀
+      if (isFavoriteMode) {
+        errorMsg = `收藏中${errorMsg}`
+      }
+      
       throw new Error(errorMsg)
     }
     
@@ -812,8 +1174,9 @@ export function apply(ctx: Context, config: Config) {
     let startMessage = guessGame.totalRounds > 1 
       ? `🎵 第 ${guessGame.currentRound + 1}/${guessGame.totalRounds} 轮猜歌游戏开始！请在1分钟内猜出歌曲名称或别名`
       : `🎵 猜歌游戏开始！请在1分钟内猜出歌曲名称或别名`
-    if (gameGenre || gameLevelOption || guessGame.difficulty > 0) {
+    if (gameGenre || gameLevelOption || guessGame.difficulty > 0 || isFavoriteMode) {
       const filters = []
+      if (isFavoriteMode) filters.push(`模式: 收藏歌曲`)
       if (gameGenre) filters.push(`类别: ${randomSong.basic_info.genre}`)
       if (gameLevelOption) filters.push(`歌曲等级: ${gameLevelOption}`)
       if (guessGame.difficulty > 0) filters.push(`难度: ${guessGame.difficulty}`)
@@ -957,7 +1320,7 @@ export function apply(ctx: Context, config: Config) {
       setTimeout(async () => {
         try {
           // 使用游戏实例中保存的参数
-          await startGuessGame(session, game, game.genre, game.levelOption)
+          await startGuessGame(session, game, game.genre, game.levelOption, game.favoriteOption)
         } catch (error) {
           logger.error('开始下一轮猜歌游戏失败:', error)
           if (session) {
