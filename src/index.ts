@@ -9,6 +9,7 @@ const STORAGE_DIR = path.join(process.cwd(), 'data', 'maimai-guess-song')
 const STORAGE_FILE = path.join(STORAGE_DIR, 'song-cache.json')
 const SCORE_FILE = path.join(STORAGE_DIR, 'user-scores.json')
 const FAVORITE_FILE = path.join(STORAGE_DIR, 'channel-favorites.json')
+const COVER_DIR = path.join(process.cwd(), 'data', 'maimai-guess-cover')
 
 // 确保存储目录存在
 if (!fs.existsSync(STORAGE_DIR)) {
@@ -651,7 +652,16 @@ export function apply(ctx: Context, config: Config) {
           ...difficulties
         ].join('\n')
 
-        return message
+        // 尝试获取封面图片
+        const paddedSongId = song.id.toString().padStart(5, '0')
+        const coverPath = path.join(COVER_DIR, `${paddedSongId}.jpg`)
+        const elements: (string | ReturnType<typeof h.image>)[] = [message]
+        
+        if (fs.existsSync(coverPath)) {
+          elements.push(h.image('file:///' + coverPath.replace(/\\/g, '/')))
+        }
+
+        return elements
       } catch (error) {
         logger.error('搜索歌曲失败:', error)
         return '搜索失败，请稍后重试'

@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-maimai-guess-song",
   "description": "舞萌猜歌游戏插件，随机播放舞萌歌曲片段让群友猜测，支持别名匹配和积分系统",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "contributors": [
     "LambSpine <andy1206hu@gmail.com>"
   ],
